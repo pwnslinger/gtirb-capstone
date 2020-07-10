@@ -9,10 +9,19 @@
 # reflect the position or policy of the Government and no official
 # endorsement should be inferred.
 #
-import capstone
+
 from gtirb import ByteInterval, Offset
+import gtirb
 import keystone
+import capstone
 import logging
+from gtirb_capstone.instructions import GtirbInstructionDecoder
+from gtirb_capstone.instructions import GTIRB_ISA_TO_CAPSTONE, GTIRB_ISA_TO_CAPSTONE_MODE
+from functools import lru_cache
+
+
+class GtirbCapstoneError(Exception):
+    pass
 
 
 class RewritingContext(object):
@@ -20,17 +29,19 @@ class RewritingContext(object):
     objects for use in rewriting that IR.
     """
 
-    cp = None
     ks = None
     ir = None
 
-    def __init__(self, ir, cp=None, ks=None):
+    def __init__(self, ir, ks=None, cp=None):
         self.ir = ir
-        # Setup capstone
+        self._arch = ir.modules[0].isa
+
         if cp is None:
-            self.cp = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
+            # Setup Capstone
+            self.cp = capstone.Cs(GTIRB_ISA_TO_CAPSTONE[self._arch], GTIRB_ISA_TO_CAPSTONE_MODE[self._arch])
         else:
             self.cp = cp
+
         if ks is None:
             # Setup keystone
             self.ks = keystone.Ks(keystone.KS_ARCH_X86, keystone.KS_MODE_64)
@@ -141,19 +152,37 @@ class RewritingContext(object):
         logger.debug("  After:")
         self.show_block_asm(block, logger=logger)
 
-    def show_block_asm(self, block, logger=logging.Logger("null")):
-        """Disassemble and print the contents of a code block."""
+    @lru_cache()
+    def get_instruction_decoder(
+        self, arch: gtirb.Module.ISA
+    ) -> GtirbInstructionDecoder:
+        """
+        Return an instruction decoder for a given an isa.
+        """
+        return GtirbInstructionDecoder(arch)
 
-        addr = (
-            block.byte_interval.address
-            if block.byte_interval.address is not None
-            else 0
-        )
+    def show_block_asm(
+        self,
+        block: gtirb.CodeBlock,
+        arch: gtirb.Module.ISA = None,
+        logger=logging.Logger("null"),
+    ):
+        """
+        Disassemble and print the contents of a code block using
+        the given architecture. If no architecture is given,
+        it is taken from the block's module. If the block
+        is not in a module, the function throws an error.
+        """
 
-        for i in self.cp.disasm(
-            block.byte_interval.contents[
-                block.offset : block.offset + block.size
-            ],
-            addr + block.offset,
-        ):
+        if arch is None:
+            if (
+                block.byte_interval is not None
+                and block.byte_interval.section is not None
+                and block.byte_interval.section.module is not None
+            ):
+                arch = block.byte_interval.section.module.isa
+        if arch is None:
+            raise GtirbCapstoneError("Undefined architecture")
+
+        for i in self.get_instruction_decoder(arch).get_instructions(block):
             logger.debug("\t0x%x:\t%s\t%s" % (i.address, i.mnemonic, i.op_str))
