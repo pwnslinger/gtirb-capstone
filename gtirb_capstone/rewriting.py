@@ -111,14 +111,14 @@ class RewritingContext(object):
         logger.debug("  Before:")
         self.show_block_asm(block, logger=logger)
 
-        # n_bytes = len(new_bytes)
+        n_bytes = len(new_bytes)
         bi = block.byte_interval
 
         if overlapping:
             bi.size += delta
 
         bi.contents = (
-            bi.contents[:offset] + bytes(new_bytes) + bi.contents[offset:]
+            bi.contents[:offset] + bytes(new_bytes) + bi.contents[offset+n_bytes:]
         )
 
         # adjust blocks that occur after the insertion point
