@@ -13,7 +13,9 @@
 from gtirb import ByteInterval, Offset
 import gtirb
 import keystone
+import capstone
 import logging
+import copy
 from gtirb_capstone.instructions import GtirbInstructionDecoder
 from functools import lru_cache
 
@@ -32,6 +34,7 @@ class RewritingContext(object):
 
     def __init__(self, ir, ks=None):
         self.ir = ir
+        self.cp = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
 
         if ks is None:
             # Setup keystone
@@ -39,7 +42,19 @@ class RewritingContext(object):
             self.ks.syntax = keystone.KS_OPT_SYNTAX_ATT
         else:
             self.ks = ks
+       
         self.prepare_for_rewriting()
+
+    def __copy__(self):
+        new_instance = RewritingContext(self.ir)
+        new_instance.__dict__.update(self.__dict__)
+        return new_instance
+
+    def __deepcopy__(self, memodict={}):
+        new_instance = RewritingContext(self.ir)
+        new_instance.__dict__.update(self.__dict__)
+        new_instance.ir = copy.deepcopy(self.ir, memodict)
+        return new_instance
 
     def prepare_for_rewriting(self):
         """Prepare an IR for rewriting using gtirb-capstone.
@@ -85,6 +100,55 @@ class RewritingContext(object):
         # Update the block
         block.byte_interval = new_bi
         block.offset = 0
+
+    def modify_block(
+        self, block, new_bytes, offset, overlapping=False, delta=0, logger=logging.Logger("null")
+    ):
+        """Insert bytes into a block."""
+
+        offset += block.offset
+
+        logger.debug("  Before:")
+        self.show_block_asm(block, logger=logger)
+
+        # n_bytes = len(new_bytes)
+        bi = block.byte_interval
+
+        if overlapping:
+            bi.size += delta
+
+        bi.contents = (
+            bi.contents[:offset] + bytes(new_bytes) + bi.contents[offset:]
+        )
+
+        # adjust blocks that occur after the insertion point
+        # TODO: what if blocks overlap over the insertion point?
+        for b in bi.blocks:
+            if b != block and b.offset >= offset:
+                b.offset += delta
+
+        # adjust sym exprs that occur after the insertion point
+        bi.symbolic_expressions = {
+            (k + delta if k >= offset else k): v
+            for k, v in bi.symbolic_expressions.items()
+        }
+
+        # adjust aux data if present
+        # TODO: what other aux data uses byte interval offsets?
+        sym_expr_sizes = bi.module.aux_data.get("symbolicExpressionSizes")
+        if sym_expr_sizes is not None:
+            sym_expr_sizes.data = {
+                (
+                    Offset(bi, k.displacement + delta)
+                    if k.element_id == bi and k.displacement >= offset
+                    else k
+                ): v
+                for k, v in sym_expr_sizes.data.items()
+            }
+
+        # all done
+        logger.debug("  After:")
+        self.show_block_asm(block, logger=logger)
 
     def modify_block_insert(
         self, module, block, new_bytes, offset, logger=logging.Logger("null")
